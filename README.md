@@ -244,11 +244,6 @@ Open two browser windows at `http://localhost:5173`. Create a room in one, join 
 - **Cursor presence** — Broadcast each user's cursor position on a separate low-frequency topic
 - **Named boards** — Let users save and revisit whiteboards by name
 
----
-
-## Resume Summary
-
-> Built a full-stack real-time collaborative whiteboard using **Java Spring Boot** and **WebSocket (STOMP)**, enabling simultaneous multi-user drawing with sub-100ms latency. Implemented **write-behind caching** — Redis buffers high-frequency draw events, PostgreSQL receives periodic batch snapshots — supporting late-joining users with full canvas history. Containerized with **Docker multi-stage builds**, deployed backend on **Railway** with managed PostgreSQL and Redis, frontend on **Vercel**.
 
 ---
 
