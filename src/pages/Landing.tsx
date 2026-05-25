@@ -46,7 +46,7 @@ export default function Landing() {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4">
       <h1 className="mb-2 text-5xl font-bold tracking-tight text-foreground">
-        Sketch<span className="text-primary">Share</span>
+        Sketch<span className="text-primary">Room</span>
       </h1>
       <p className="mb-10 text-muted-foreground">Real-time collaborative whiteboard</p>
 
