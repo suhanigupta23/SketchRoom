@@ -48,7 +48,7 @@ export default function Whiteboard() {
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <h2 className="text-sm font-semibold text-foreground">
-            Sketch<span className="text-primary">Share</span>
+            Sketch<span className="text-primary">Room</span>
           </h2>
         </div>
         <div className="flex items-center gap-3">
