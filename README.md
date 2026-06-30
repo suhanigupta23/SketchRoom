@@ -17,9 +17,6 @@
 | | |
 |---|---|
 | **Live App** | [https://sketch-room-ashy.vercel.app/] |
-| **Backend API** | [https://sketchroom-backend-production.up.railway.app/] |
-| **Frontend Repo** | [https://github.com/suhanigupta23/SketchRoom] |
-| **Backend Repo** | [https://github.com/suhanigupta23/sketchroom-backend] |
 
 ---
 
