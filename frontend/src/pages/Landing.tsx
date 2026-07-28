@@ -6,24 +6,22 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 
-function generateRoomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  return code;
-}
-
 export default function Landing() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [createdCode, setCreatedCode] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState("");
 
-  const handleCreate = () => {
-    // Stub: POST /api/rooms
-    const code = generateRoomCode();
-    setCreatedCode(code);
-    toast({ title: "Room created!", description: `Code: ${code}` });
+  const handleCreate = async () => {
+    try {
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080'}/api/rooms`, { method: 'POST' });
+      if (!res.ok) throw new Error("Failed");
+      const data = await res.json();
+      setCreatedCode(data.roomCode);
+      toast({ title: "Room created!", description: `Code: ${data.roomCode}` });
+    } catch (e) {
+      toast({ title: "Error", description: "Failed to create room. Is the backend running?", variant: "destructive" });
+    }
   };
 
   const handleJoin = () => {

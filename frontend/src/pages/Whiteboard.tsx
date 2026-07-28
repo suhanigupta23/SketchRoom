@@ -12,12 +12,69 @@ export default function Whiteboard() {
   const { roomCode } = useParams<{ roomCode: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
+  
+  // Only connect WebSocket after validating room and loading snapshot
+  const [validatedRoomCode, setValidatedRoomCode] = useState<string>("");
   const { sendDrawEvent, onDrawEvent, clearCanvas, connectedUsers, isConnected } 
-  = useWhiteboard(roomCode || "");
+  = useWhiteboard(validatedRoomCode);
+  
   const canvasHandleRef = useRef<WhiteboardCanvasHandle>(null);
   const [color, setColor] = useState("#1a1a2e");
   const [brushSize, setBrushSize] = useState(4);
   const [isEraser, setIsEraser] = useState(false);
+  
+  useEffect(() => {
+    if (!roomCode) return;
+    let isMounted = true;
+
+    const initRoom = async () => {
+      try {
+        const res = await fetch(`${import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080'}/api/rooms/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roomCode })
+        });
+        const data = await res.json();
+        
+        if (!res.ok || !data.success) {
+          if (isMounted) {
+            toast({ title: "Error", description: data.message || "Room not found", variant: "destructive" });
+            navigate("/");
+          }
+          return;
+        }
+
+        if (isMounted) {
+          if (data.canvasSnapshot) {
+            try {
+              const events = JSON.parse(data.canvasSnapshot);
+              // Ensure canvas is ready
+              setTimeout(() => {
+                events.forEach((event: any) => {
+                  if (event.type === "draw" && event.prevX != null && event.x != null) {
+                    (window as any).__whiteboardDrawLine?.(event.prevX, event.prevY, event.x, event.y, event.color, event.size, event.isEraser);
+                  } else if (event.type === "clear") {
+                    (window as any).__whiteboardClear?.();
+                  }
+                });
+              }, 50);
+            } catch (e) {
+              console.error("Failed to parse snapshot", e);
+            }
+          }
+          setValidatedRoomCode(roomCode);
+        }
+      } catch (e) {
+        if (isMounted) {
+          toast({ title: "Error", description: "Failed to join room. Is backend running?", variant: "destructive" });
+          navigate("/");
+        }
+      }
+    };
+    initRoom();
+    
+    return () => { isMounted = false; };
+  }, [roomCode, navigate, toast]);
   
   useEffect(() => {
     onDrawEvent((event) => {
@@ -78,7 +135,7 @@ export default function Whiteboard() {
           onUndo={() => canvasHandleRef.current?.undo()}
           onRedo={() => canvasHandleRef.current?.redo()}
         />
-        <div className="flex-1">
+        <div className="flex-1 overflow-auto bg-gray-100 relative">
           <WhiteboardCanvas ref={canvasHandleRef} color={color} brushSize={brushSize} isEraser={isEraser} onDraw={sendDrawEvent} />
         </div>
       </div>

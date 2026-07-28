@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: sketchroom-backend
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    healthCheckPath: /api/rooms/health
+    envVars:
+      - key: SPRING_DATASOURCE_URL
+        sync: false # You will paste your Neon connection string here
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false # Neon username
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false # Neon password
+      - key: REDIS_URL
+        sync: false # You will paste your Upstash Redis URL here
+      - key: CORS_ORIGINS
+        value: "*"

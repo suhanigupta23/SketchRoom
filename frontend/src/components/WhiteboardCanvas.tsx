@@ -74,18 +74,6 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
     };
   }, [drawLine]);
 
-  useEffect(() => {
-    const resize = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      canvas.width = canvas.parentElement!.clientWidth;
-      canvas.height = canvas.parentElement!.clientHeight;
-    };
-    resize();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, []);
-
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     saveSnapshot();
     isDrawing.current = true;
@@ -117,7 +105,9 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
   return (
     <canvas
       ref={canvasRef}
-      className="cursor-crosshair"
+      className="cursor-crosshair bg-white"
+      width={3000}
+      height={2000}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
