@@ -17,6 +17,7 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDrawing = useRef(false);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
+  const lastSentPos = useRef<{ x: number; y: number } | null>(null);
   const undoStack = useRef<ImageData[]>([]);
   const redoStack = useRef<ImageData[]>([]);
   const lastSendTime = useRef<number>(0);
@@ -78,20 +79,25 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     saveSnapshot();
     isDrawing.current = true;
-    lastPos.current = getPos(e);
+    const pos = getPos(e);
+    lastPos.current = pos;
+    lastSentPos.current = pos;
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing.current || !lastPos.current) return;
+    if (!isDrawing.current || !lastPos.current || !lastSentPos.current) return;
     const pos = getPos(e);
+    
+    // Always draw locally for perfectly smooth client-side curves
     drawLine(lastPos.current.x, lastPos.current.y, pos.x, pos.y, color, brushSize, isEraser);
     
     const now = Date.now();
+    // Throttle websocket sends, but send a continuous line from the LAST sent position
     if (now - lastSendTime.current > 20) {
       onDraw({
         type: "draw",
-        prevX: lastPos.current.x,
-        prevY: lastPos.current.y,
+        prevX: lastSentPos.current.x,
+        prevY: lastSentPos.current.y,
         x: pos.x,
         y: pos.y,
         color,
@@ -99,13 +105,28 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
         isEraser,
       });
       lastSendTime.current = now;
+      lastSentPos.current = pos;
     }
     lastPos.current = pos;
   };
 
   const handleMouseUp = () => {
+    // Send final line segment when mouse goes up to prevent cut-off ends
+    if (isDrawing.current && lastSentPos.current && lastPos.current) {
+        onDraw({
+            type: "draw",
+            prevX: lastSentPos.current.x,
+            prevY: lastSentPos.current.y,
+            x: lastPos.current.x,
+            y: lastPos.current.y,
+            color,
+            size: brushSize,
+            isEraser,
+        });
+    }
     isDrawing.current = false;
     lastPos.current = null;
+    lastSentPos.current = null;
   };
 
   return (
