@@ -19,6 +19,7 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
   const lastPos = useRef<{ x: number; y: number } | null>(null);
   const undoStack = useRef<ImageData[]>([]);
   const redoStack = useRef<ImageData[]>([]);
+  const lastSendTime = useRef<number>(0);
 
   const saveSnapshot = useCallback(() => {
     const canvas = canvasRef.current;
@@ -84,16 +85,21 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, bru
     if (!isDrawing.current || !lastPos.current) return;
     const pos = getPos(e);
     drawLine(lastPos.current.x, lastPos.current.y, pos.x, pos.y, color, brushSize, isEraser);
-    onDraw({
-      type: "draw",
-      prevX: lastPos.current.x,
-      prevY: lastPos.current.y,
-      x: pos.x,
-      y: pos.y,
-      color,
-      size: brushSize,
-      isEraser,
-    });
+    
+    const now = Date.now();
+    if (now - lastSendTime.current > 20) {
+      onDraw({
+        type: "draw",
+        prevX: lastPos.current.x,
+        prevY: lastPos.current.y,
+        x: pos.x,
+        y: pos.y,
+        color,
+        size: brushSize,
+        isEraser,
+      });
+      lastSendTime.current = now;
+    }
     lastPos.current = pos;
   };
 

@@ -30,13 +30,12 @@ public class DrawingController {
         log.debug("Draw event in room {} from session {}: type={}",
             roomKey, sessionId, event.getType());
 
-        // Buffer event in Redis for canvas snapshot
-        roomService.appendDrawEvent(roomKey, event);
-
-        // Broadcast to ALL subscribers of this room's topic
-        // including the sender — frontend ignores its own local draws
+        // Broadcast to ALL subscribers immediately for near-zero latency
         messagingTemplate.convertAndSend(
             "/topic/room/" + roomKey, event);
+
+        // Buffer event in Redis asynchronously for canvas snapshot
+        roomService.appendDrawEvent(roomKey, event);
     }
 
     // ── Receive clear event, broadcast to whole room ──────────────────

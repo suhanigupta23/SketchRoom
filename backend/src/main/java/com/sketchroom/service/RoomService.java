@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -82,13 +83,21 @@ public class RoomService {
         Room room = roomOpt.get();
         int connectedUsers = getConnectedUserCount(roomCode);
 
+        // Fetch live events directly from Redis instead of waiting for 30s postgres snapshot
+        String eventsKey = ROOM_EVENTS_KEY + roomCode.toUpperCase();
+        List<String> events = redisTemplate.opsForList().range(eventsKey, 0, -1);
+        String liveSnapshot = room.getCanvasSnapshot();
+        if (events != null && !events.isEmpty()) {
+            liveSnapshot = "[" + String.join(",", events) + "]";
+        }
+
         log.info("User joining room: {} ({} users currently)",
             roomCode, connectedUsers);
 
         return JoinRoomResponse.builder()
                 .roomCode(room.getRoomKey())
                 .wsUrl(wsBaseUrl)
-                .canvasSnapshot(room.getCanvasSnapshot())
+                .canvasSnapshot(liveSnapshot)
                 .connectedUsers(connectedUsers)
                 .success(true)
                 .message("Joined successfully")
@@ -118,6 +127,7 @@ public class RoomService {
 
     // ── Draw Event Buffering ──────────────────────────────────────────
 
+    @Async
     public void appendDrawEvent(String roomKey, DrawEvent event) {
         try {
             // If it's a clear event, wipe the entire buffer
