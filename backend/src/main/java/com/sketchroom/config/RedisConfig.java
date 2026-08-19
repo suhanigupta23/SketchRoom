@@ -13,28 +13,7 @@ import java.net.URI;
 @Configuration
 public class RedisConfig {
 
-    @Value("${spring.data.redis.url:redis://localhost:6379}")
-    private String redisUrl;
 
-    @Bean
-    public LettuceConnectionFactory redisConnectionFactory() {
-        try {
-            URI uri = URI.create(redisUrl);
-            RedisStandaloneConfiguration config =
-                new RedisStandaloneConfiguration();
-            config.setHostName(uri.getHost());
-            config.setPort(uri.getPort());
-            if (uri.getUserInfo() != null) {
-                String[] parts = uri.getUserInfo().split(":");
-                if (parts.length > 1) {
-                    config.setPassword(parts[1]);
-                }
-            }
-            return new LettuceConnectionFactory(config);
-        } catch (Exception e) {
-            return new LettuceConnectionFactory("localhost", 6379);
-        }
-    }
 
     @Bean
     public RedisTemplate<String, String> redisTemplate(
