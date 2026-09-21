@@ -1,148 +1,158 @@
-import { useRef, useEffect, useCallback, useImperativeHandle, forwardRef } from "react";
-import { DrawEvent } from "@/hooks/useWhiteboard";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
+import type { BoardSnapshot, DrawEvent } from "@/types/whiteboard";
+import { historyTargets, visibleSegments } from "@/lib/board";
+
+const WIDTH = 3000;
+const HEIGHT = 2000;
 
 export interface WhiteboardCanvasHandle {
+  loadSnapshot: (snapshot: BoardSnapshot) => void;
+  receiveEvent: (event: DrawEvent) => void;
   undo: () => void;
   redo: () => void;
 }
-
 interface Props {
   color: string;
   brushSize: number;
   isEraser: boolean;
-  onDraw: (event: DrawEvent) => void;
+  disabled: boolean;
+  onDraw: (event: DrawEvent) => boolean;
+  onHistoryChange: (undo: boolean, redo: boolean) => void;
+}
+type Point = { x: number; y: number };
+
+function drawLine(ctx: CanvasRenderingContext2D, event: DrawEvent) {
+  if (event.type !== "draw") return;
+  ctx.strokeStyle = event.isEraser ? "#ffffff" : event.color!;
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.lineWidth = event.size!;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  // A click without moving should also leave a visible dot.
+  if (event.prevX === event.x && event.prevY === event.y) {
+    ctx.arc(event.x!, event.y!, event.size! / 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.moveTo(event.prevX!, event.prevY!);
+    ctx.lineTo(event.x!, event.y!);
+    ctx.stroke();
+  }
 }
 
-const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(({ color, brushSize, isEraser, onDraw }, ref) => {
+const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(function WhiteboardCanvas(
+  { color, brushSize, isEraser, disabled, onDraw, onHistoryChange }, ref,
+) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const isDrawing = useRef(false);
-  const lastPos = useRef<{ x: number; y: number } | null>(null);
-  const lastSentPos = useRef<{ x: number; y: number } | null>(null);
-  const undoStack = useRef<ImageData[]>([]);
-  const redoStack = useRef<ImageData[]>([]);
-  const lastSendTime = useRef<number>(0);
+  const previewRef = useRef<HTMLCanvasElement>(null);
+  const events = useRef<DrawEvent[]>([]);
+  const pending = useRef(new Map<string, DrawEvent>());
+  const sessionId = useRef("");
+  const stroke = useRef<{ id: string; pointer: number; sent: Point; current: Point; lastSend: number; color: string; size: number; eraser: boolean } | null>(null);
 
-  const saveSnapshot = useCallback(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    undoStack.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
-    if (undoStack.current.length > 50) undoStack.current.shift();
-    redoStack.current = [];
+  const updateHistory = useCallback(() => {
+    const targets = historyTargets(events.current, sessionId.current);
+    onHistoryChange(Boolean(targets.undo), Boolean(targets.redo));
+  }, [onHistoryChange]);
+
+  const renderPreview = useCallback(() => {
+    const ctx = previewRef.current?.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    for (const event of pending.current.values()) drawLine(ctx, event);
+    const current = stroke.current;
+    if (current) drawLine(ctx, { type: "draw", eventId: "preview", prevX: current.sent.x, prevY: current.sent.y,
+      x: current.current.x, y: current.current.y, color: current.color, size: current.size, isEraser: current.eraser });
+  }, []);
+
+  const redraw = useCallback(() => {
+    const ctx = canvasRef.current?.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    for (const event of visibleSegments(events.current)) drawLine(ctx, event);
   }, []);
 
   useImperativeHandle(ref, () => ({
-    undo: () => {
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (!canvas || !ctx || undoStack.current.length === 0) return;
-      redoStack.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
-      const prev = undoStack.current.pop()!;
-      ctx.putImageData(prev, 0, 0);
+    loadSnapshot(snapshot) {
+      events.current = snapshot.events;
+      sessionId.current = snapshot.sessionId;
+      pending.current.clear(); stroke.current = null;
+      redraw(); renderPreview(); updateHistory();
     },
-    redo: () => {
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (!canvas || !ctx || redoStack.current.length === 0) return;
-      undoStack.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
-      const next = redoStack.current.pop()!;
-      ctx.putImageData(next, 0, 0);
+    receiveEvent(event) {
+      pending.current.delete(event.eventId);
+      if (event.type === "clear") {
+        events.current = []; pending.current.clear(); stroke.current = null;
+      }
+      events.current.push(event);
+      const ctx = canvasRef.current?.getContext("2d");
+      if (event.type === "draw" && ctx) drawLine(ctx, event);
+      else redraw();
+      renderPreview(); updateHistory();
     },
-  }), []);
-
-  const getPos = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = canvasRef.current!.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  };
-
-  const drawLine = useCallback((prevX: number, prevY: number, x: number, y: number, c: string, size: number, eraser: boolean) => {
-    const ctx = canvasRef.current?.getContext("2d");
-    if (!ctx) return;
-    ctx.beginPath();
-    ctx.moveTo(prevX, prevY);
-    ctx.lineTo(x, y);
-    ctx.strokeStyle = eraser ? "#ffffff" : c;
-    ctx.lineWidth = size;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.stroke();
-  }, []);
+    undo() {
+      const target = historyTargets(events.current, sessionId.current).undo;
+      if (!disabled && target) onDraw({ type: "undo", eventId: crypto.randomUUID(), strokeId: target });
+    },
+    redo() {
+      const target = historyTargets(events.current, sessionId.current).redo;
+      if (!disabled && target) onDraw({ type: "redo", eventId: crypto.randomUUID(), strokeId: target });
+    },
+  }), [disabled, onDraw, redraw, renderPreview, updateHistory]);
 
   useEffect(() => {
-    (window as any).__whiteboardDrawLine = drawLine;
-    (window as any).__whiteboardClear = () => {
-      const ctx = canvasRef.current?.getContext("2d");
-      if (ctx && canvasRef.current) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    };
-  }, [drawLine]);
+    if (disabled) { stroke.current = null; pending.current.clear(); renderPreview(); }
+  }, [disabled, renderPreview]);
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    saveSnapshot();
-    isDrawing.current = true;
-    const pos = getPos(e);
-    lastPos.current = pos;
-    lastSentPos.current = pos;
+  const position = (e: React.PointerEvent<HTMLCanvasElement>): Point => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(WIDTH, (e.clientX - rect.left) * WIDTH / rect.width)),
+      y: Math.max(0, Math.min(HEIGHT, (e.clientY - rect.top) * HEIGHT / rect.height)) };
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing.current || !lastPos.current || !lastSentPos.current) return;
-    const pos = getPos(e);
-    
-    // Always draw locally for perfectly smooth client-side curves
-    drawLine(lastPos.current.x, lastPos.current.y, pos.x, pos.y, color, brushSize, isEraser);
-    
-    const now = Date.now();
-    // Throttle websocket sends, but send a continuous line from the LAST sent position
-    if (now - lastSendTime.current > 20) {
-      onDraw({
-        type: "draw",
-        prevX: lastSentPos.current.x,
-        prevY: lastSentPos.current.y,
-        x: pos.x,
-        y: pos.y,
-        color,
-        size: brushSize,
-        isEraser,
-      });
-      lastSendTime.current = now;
-      lastSentPos.current = pos;
-    }
-    lastPos.current = pos;
+  const sendSegment = () => {
+    const current = stroke.current;
+    if (!current || disabled) return;
+    const event: DrawEvent = { type: "draw", eventId: crypto.randomUUID(), strokeId: current.id,
+      prevX: current.sent.x, prevY: current.sent.y, x: current.current.x, y: current.current.y,
+      color: current.color, size: current.size, isEraser: current.eraser };
+    if (onDraw(event)) pending.current.set(event.eventId, event);
+    current.sent = current.current;
+    current.lastSend = Date.now();
+    renderPreview();
   };
 
-  const handleMouseUp = () => {
-    // Send final line segment when mouse goes up to prevent cut-off ends
-    if (isDrawing.current && lastSentPos.current && lastPos.current) {
-        onDraw({
-            type: "draw",
-            prevX: lastSentPos.current.x,
-            prevY: lastSentPos.current.y,
-            x: lastPos.current.x,
-            y: lastPos.current.y,
-            color,
-            size: brushSize,
-            isEraser,
-        });
-    }
-    isDrawing.current = false;
-    lastPos.current = null;
-    lastSentPos.current = null;
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (disabled || e.button !== 0 || stroke.current) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const point = position(e);
+    stroke.current = { id: crypto.randomUUID(), pointer: e.pointerId, sent: point, current: point,
+      lastSend: 0, color, size: brushSize, eraser: isEraser };
+    sendSegment();
+  };
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!stroke.current || stroke.current.pointer !== e.pointerId || disabled) return;
+    stroke.current.current = position(e);
+    if (Date.now() - stroke.current.lastSend >= 20) sendSegment();
+    else renderPreview();
+  };
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!stroke.current || stroke.current.pointer !== e.pointerId) return;
+    stroke.current.current = position(e);
+    sendSegment(); stroke.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    renderPreview();
   };
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="cursor-crosshair bg-white"
-      width={3000}
-      height={2000}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-    />
+    <div className="relative bg-white" style={{ width: WIDTH, height: HEIGHT }}>
+      <canvas ref={canvasRef} width={WIDTH} height={HEIGHT} className="absolute inset-0" aria-hidden="true" />
+      <canvas ref={previewRef} width={WIDTH} height={HEIGHT}
+        className={`absolute inset-0 touch-none ${disabled ? "cursor-not-allowed" : "cursor-crosshair"}`}
+        aria-label="Shared drawing canvas" aria-disabled={disabled}
+        onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp}
+        onPointerCancel={() => { stroke.current = null; renderPreview(); }} />
+    </div>
   );
 });
-
-WhiteboardCanvas.displayName = "WhiteboardCanvas";
-
 export default WhiteboardCanvas;

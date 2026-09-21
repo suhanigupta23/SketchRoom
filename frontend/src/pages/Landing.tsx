@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Copy, Plus, LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -6,22 +6,27 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 
+import { requestRoom } from "@/lib/api";
+
 export default function Landing() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [createdCode, setCreatedCode] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState("");
+  const creatingRef = useRef(false);
+  const [creating, setCreating] = useState(false);
 
   const handleCreate = async () => {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
     try {
-      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080'}/api/rooms`, { method: 'POST' });
-      if (!res.ok) throw new Error("Failed");
-      const data = await res.json();
+      const data = await requestRoom("");
       setCreatedCode(data.roomCode);
       toast({ title: "Room created!", description: `Code: ${data.roomCode}` });
-    } catch (e) {
-      toast({ title: "Error", description: "Failed to create room. Is the backend running?", variant: "destructive" });
-    }
+    } catch (error) {
+      toast({ title: "Could not create room", description: error instanceof Error ? error.message : "Please try again.", variant: "destructive" });
+    } finally { creatingRef.current = false; setCreating(false); }
   };
 
   const handleJoin = () => {
@@ -30,15 +35,16 @@ export default function Landing() {
       toast({ title: "Invalid code", description: "Enter a 6-character room code.", variant: "destructive" });
       return;
     }
-    // Stub: POST /api/rooms/join
+    // The room page validates the code with the server before connecting.
     navigate(`/room/${code}`);
   };
 
-  const copyCode = () => {
-    if (createdCode) {
-      navigator.clipboard.writeText(createdCode);
+  const copyCode = async () => {
+    if (!createdCode) return;
+    try {
+      await navigator.clipboard.writeText(createdCode);
       toast({ title: "Copied!" });
-    }
+    } catch { toast({ title: "Could not copy", description: "Select and copy the code manually.", variant: "destructive" }); }
   };
 
   return (
@@ -60,7 +66,7 @@ export default function Landing() {
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
                   <Input readOnly value={createdCode} className="font-mono text-center text-lg tracking-widest" />
-                  <Button size="icon" variant="outline" onClick={copyCode}>
+                  <Button size="icon" variant="outline" onClick={copyCode} aria-label="Copy room code">
                     <Copy className="h-4 w-4" />
                   </Button>
                 </div>
@@ -69,7 +75,7 @@ export default function Landing() {
                 </Button>
               </div>
             ) : (
-              <Button onClick={handleCreate} className="w-full">Create Room</Button>
+              <Button disabled={creating} onClick={handleCreate} className="w-full">{creating ? "Creating…" : "Create Room"}</Button>
             )}
           </CardContent>
         </Card>

@@ -1,247 +1,207 @@
 # SketchRoom
 
-> Real-time collaborative whiteboard. Share a code. Draw together.
+**Share a code. Draw together.**
 
-![Live](https://img.shields.io/badge/status-live-brightgreen)
-![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.2-6DB33F?logo=springboot&logoColor=white)
-![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
-![WebSocket](https://img.shields.io/badge/WebSocket-STOMP-orange)
-![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-multi--stage-2496ED?logo=docker&logoColor=white)
+A full-stack collaborative whiteboard for explaining ideas, sketching diagrams, and brainstorming together in the browser. Create a room, share its six-character code, and collaborate without signing up.
 
----
+[Live demo](https://sketch-room-ashy.vercel.app/) · [Code walkthrough](docs/CODE_WALKTHROUGH.md) · [Deployment guide](docs/DEPLOYMENT.md)
 
-## 🔗 Links
+## The problem
 
-| | |
+Remote discussions often need a shared visual space: a diagram to explain a system, a sketch to explore an idea, or a board to work through a problem. Sending screenshots interrupts that conversation and leaves participants looking at different versions.
+
+SketchRoom gives participants a shared canvas with live drawing updates and saved room history. The engineering focus is keeping that shared state consistent when people join late, undo a stroke, clear the board, or reconnect after losing their connection.
+
+## Try it
+
+1. Open the demo and select **Create Room**.
+2. Copy the room code and select **Enter Room**.
+3. Open a second browser/tab, enter the code, and join.
+4. Draw from either window, then try undo, redo, clear, and reload.
+
+## Current features
+
+- **Code-based rooms:** create or join a shared board using a six-character code; rooms expire after 24 hours.
+- **Live collaboration:** drawing commands are broadcast to participants through STOMP over WebSocket.
+- **Drawing tools:** eight colors, adjustable brush size, eraser, and shared clear.
+- **Shared undo/redo:** undo or restore your current connection's strokes without replacing another participant's work with an old image.
+- **Late-join replay:** new participants reconstruct the board from its saved event history.
+- **Reconnect recovery:** reconnecting clients reload a snapshot and apply newer events before drawing is enabled.
+- **Presence and connection status:** see participant counts and whether the board is connecting, loading, connected, or expired.
+- **Pointer input:** mouse, pen, and touch use the same drawing handlers.
+- **Validation:** the backend checks room expiry, session membership, drawing fields, and undo ownership.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Browser A: React + Canvas] -->|HTTP create/join| API[Spring Boot REST API]
+    B[Browser B: React + Canvas] -->|HTTP create/join| API
+    A <-->|STOMP / WebSocket| WS[Spring topic broker + drawing controller]
+    B <-->|STOMP / WebSocket| WS
+    API --> Service[RoomService]
+    WS --> Service
+    Service -->|Accepted drawing events and sessions| Redis[(Redis)]
+    Service -->|Room records and periodic checkpoints| DB[(PostgreSQL / Neon)]
+```
+
+1. **Create or validate a room** through the REST API.
+2. **Subscribe before loading history.** The server returns a private snapshot while the client buffers live updates.
+3. **Draw locally and send commands.** A temporary canvas layer previews drawing immediately; accepted events become the shared canvas state.
+4. **Order and store updates.** The server assigns sequence numbers, appends events to Redis, and broadcasts them to room subscribers.
+5. **Checkpoint the board.** PostgreSQL receives JSON event snapshots every 30 seconds when a board changed, and on clear, last disconnect, or graceful shutdown.
+
+A snapshot is a list of drawing instructions, not an image. Replaying those instructions rebuilds the board.
+
+## Engineering decisions
+
+| Decision | Reason and tradeoff |
 |---|---|
-| **Live App** | [https://sketch-room-ashy.vercel.app/] |
+| WebSocket + STOMP | Keeps a live connection and supplies named room destinations for updates, avoiding repeated HTTP polling. |
+| Server sequence numbers | Clients detect missing updates and ignore events already included in a snapshot. |
+| Redis + PostgreSQL checkpoints | Frequent events go to Redis; database writes are consolidated. Recent work still depends on Redis durability until checkpointed. |
+| Stroke-based undo/redo | Stores commands instead of full-canvas pixel copies and synchronizes changes across participants. |
+| One room lock for related operations | Serializes updates inside the backend process. Horizontal scaling would require distributed coordination. |
+| Explicit history limit | Preserves existing work instead of silently trimming old strokes. At the limit, users can clear or create a new room. |
 
----
+## Tech stack
 
-## What Is This
-
-SketchRoom is a full-stack real-time collaborative whiteboard where two or more users join a shared room using a 6-character code and draw simultaneously. Every stroke appears on the other person's screen within milliseconds — no refresh, no polling, no delay.
-
-The project demonstrates real-time distributed systems built on WebSocket, write-behind caching with Redis, persistent canvas state in PostgreSQL, and end-to-end production deployment with Docker.
-
----
-
-## How It Works
-
-```
-User A opens app → clicks "Create Room" → gets code "XK92AB"
-User A shares "XK92AB" with User B
-User B enters "XK92AB" → clicks "Join"
-Both are now on the same canvas
-User A draws a line → User B sees it in ~20ms
-User B draws → User A sees it in ~20ms
-```
-
-Under the hood:
-
-1. Frontend calls `POST /api/rooms` or `POST /api/rooms/join` via HTTP
-2. Both clients open a persistent WebSocket connection to the Spring Boot server
-3. Each subscribes to `/topic/room/XK92AB` via STOMP
-4. Mouse movements emit `DrawEvent` objects to `/app/draw/XK92AB`
-5. Spring Boot receives and immediately broadcasts to all room subscribers
-6. Every subscriber renders the incoming stroke on their canvas
-
----
-
-## Tech Stack
-
-| Layer | Technology | Purpose |
+| Layer | Technologies | Role |
 |---|---|---|
-| **Backend** | Java 17 + Spring Boot 3.2 | REST API + WebSocket server |
-| **Real-time** | WebSocket + STOMP protocol | Persistent bidirectional connection |
-| **Database** | PostgreSQL 15 | Room storage + canvas snapshots |
-| **Cache** | Redis 7 | Draw event buffer + session tracking |
-| **Frontend** | React 18 + TypeScript | UI built with Lovable |
-| **WS Client** | @stomp/stompjs | STOMP client for the browser |
-| **Backend Deploy** | Railway + Docker | Auto-deploy, managed DB + Redis |
-| **Frontend Deploy** | Vercel | Zero-config React deployment |
-| **Containers** | Docker multi-stage build | 180MB final image |
+| Frontend | React 18, TypeScript, Vite 6 | Components, typed event contracts, development and production builds. |
+| Drawing | HTML Canvas 2D, Pointer Events | Rendering and mouse/pen/touch input. |
+| UI | Tailwind CSS, Radix primitives, Lucide | Styling, reusable controls, icons, and notifications. |
+| Backend | Java 17, Spring Boot 3.5.13 | REST endpoints, WebSocket handling, validation, and scheduled jobs. |
+| Messaging | STOMP.js, Spring WebSocket simple broker | Client connections and room broadcasts. |
+| Storage | Redis, PostgreSQL, Spring Data JPA | Event buffering, session tracking, room records, and checkpoints. |
+| Build and testing | Maven, Docker, JUnit, Mockito, Vitest, Testing Library, Playwright | Packaging and automated verification. |
+| Hosting | Vercel, Render, Neon | Frontend hosting, backend hosting, and managed PostgreSQL. A separate Redis service is also required. |
 
----
+## Run locally
 
-## System Architecture
+**Prerequisites:** Git, Java 17, Node.js 22, and Docker with Compose. Maven is supplied through the repository's wrapper.
 
-```
-┌─────────────────────┐          ┌─────────────────────┐
-│   Browser (User A)  │          │   Browser (User B)  │
-│   React + TypeScript│          │   React + TypeScript│
-└────────┬────────────┘          └────────┬────────────┘
-         │                                │
-         │  HTTP: POST /api/rooms/join    │
-         │  WS:   CONNECT /ws/websocket  │
-         │  STOMP: /app/draw/XK92AB      │
-         │                                │
-         └──────────────┬─────────────────┘
-                        │
-              ┌─────────▼──────────┐
-              │   Spring Boot      │
-              │   (Railway)        │
-              │                    │
-              │  RoomController    │  ← REST API
-              │  DrawingController │  ← WebSocket handler
-              │  RoomService       │  ← Business logic
-              └──┬──────────┬──────┘
-                 │          │
-    ┌────────────▼──┐   ┌───▼────────────┐
-    │  PostgreSQL   │   │     Redis      │
-    │  (Railway)    │   │   (Railway)    │
-    │               │   │                │
-    │  rooms table  │   │ room:members:* │
-    │  canvas       │   │ room:events:*  │
-    │  snapshots    │   │ (draw buffer)  │
-    └───────────────┘   └────────────────┘
+### 1. Clone the repository
+
+```sh
+git clone https://github.com/suhanigupta23/SketchRoom.git
+cd SketchRoom
 ```
 
----
+### 2. Start storage and the backend
 
-## Key Engineering Decisions
-
-### WebSocket + STOMP over HTTP polling
-HTTP polling has the client repeatedly ask "any updates?" — introduces latency equal to the polling interval and wastes server resources. WebSocket keeps a persistent TCP connection open so the server pushes data the instant it's available. For 20–30 draw events/second per user, this is the difference between a usable and an unusable product.
-
-STOMP adds a pub/sub layer on top of raw WebSocket — clients subscribe to named topics and Spring handles all the routing. No manual connection management.
-
-### Write-behind caching pattern
-Drawing generates high-frequency writes. Writing every draw event directly to PostgreSQL would be thousands of DB writes per minute. Instead:
-- Each event is appended to a Redis List in microseconds
-- A `@Scheduled` task flushes the buffer to PostgreSQL every 30 seconds as a canvas snapshot
-- PostgreSQL gets one calm batch write instead of thousands of individual inserts
-
-### Late-joiner canvas replay
-If User B joins after User A has been drawing for 5 minutes, B needs to see the existing canvas. On join, the server returns the latest canvas snapshot (a JSON array of all DrawEvents). The frontend replays these events on the canvas before connecting to the live WebSocket stream — seamless transition from history to live.
-
-### Room code character set
-Room codes use `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` — deliberately excluding `0`, `O`, `1`, `I`, `L` which are visually ambiguous. When someone reads a code off a screen and types it manually, they shouldn't have to guess.
-
----
-
-## Project Structure
-
-```
-sketchroom-backend/                     sketchroom-frontend/
-├── config/                             ├── src/
-│   ├── WebSocketConfig.java            │   ├── components/
-│   ├── CorsConfig.java                 │   │   ├── Toolbar.tsx
-│   ├── RedisConfig.java                │   │   └── WhiteboardCanvas.tsx
-│   └── WebSocketEventListener.java     │   ├── hooks/
-├── controller/                         │   │   └── useWhiteboard.ts
-│   ├── RoomController.java             │   └── pages/
-│   └── DrawingController.java          │       ├── Landing.tsx
-├── service/                            │       └── Whiteboard.tsx
-│   └── RoomService.java                ├── .env.local
-├── model/                              └── vite.config.ts
-│   └── Room.java
-├── repository/
-│   └── RoomRepository.java
-├── dto/
-│   ├── DrawEvent.java
-│   └── RoomDtos.java
-├── Dockerfile
-├── docker-compose.yml
-└── railway.json
-```
-
----
-
-## REST API
-
-```
-POST   /api/rooms
-       ← { roomCode, wsUrl, connectedUsers }
-
-POST   /api/rooms/join
-       → Body: { "roomCode": "XK92AB" }
-       ← { roomCode, wsUrl, canvasSnapshot, connectedUsers, success }
-
-GET    /api/rooms/{roomCode}/users
-       ← { connectedUsers: 2 }
-
-GET    /api/rooms/health
-       ← "OK"
-```
-
-## WebSocket Topics (STOMP)
-
-```
-Client → Server
-  /app/draw/{roomKey}      DrawEvent { type, x, y, prevX, prevY, color, size, isEraser }
-  /app/clear/{roomKey}     Clears canvas for all room members
-  /app/join/{roomKey}      Announces presence, triggers user count broadcast
-
-Server → Client
-  /topic/room/{roomKey}          Draw and clear events
-  /topic/room/{roomKey}/users    { connectedUsers: N }
-```
-
----
-
-## Running Locally
-
-**Prerequisites:** Java 17+, Maven, Docker Desktop, Node.js 18+
-
-```bash
-# Clone both repos
-git clone https://github.com/YOUR_USERNAME/sketchroom-backend
-git clone https://github.com/YOUR_USERNAME/sketchroom-frontend
-
-# Start PostgreSQL and Redis
-cd sketchroom-backend
-docker-compose up db redis -d
-
-# Start backend (runs on :8080)
+```sh
+cd backend
+docker compose up -d
 ./mvnw spring-boot:run
+```
 
-# Start frontend in a new terminal (runs on :5173)
-cd sketchroom-frontend
-npm install
-echo "VITE_BACKEND_URL=http://localhost:8080" > .env.local
+On Windows, use `mvnw.cmd spring-boot:run`.
+
+Compose starts PostgreSQL 15 and Redis 7 with persistent volumes. Redis uses append-only persistence. The backend runs at `http://localhost:8080`.
+
+### 3. Start the frontend
+
+In a second terminal, from the repository root:
+
+```sh
+cd frontend
+npm ci
 npm run dev
 ```
 
-Open two browser windows at `http://localhost:5173`. Create a room in one, join with the code in the other. Draw.
+Open **http://localhost:8081** in two browser windows to try collaboration. The frontend defaults to the local backend; no production credentials are needed for this setup.
 
----
+## Configuration and deployment
 
-## Deployment
+The frontend is hosted on **Vercel**, the backend on **Render**, and PostgreSQL on **Neon**. Redis remains a separate backend dependency.
 
-### Backend → Railway
-- Connects to GitHub repo, builds via `Dockerfile`
-- Managed PostgreSQL and Redis provisioned as Railway plugins
-- Environment variables configured via Railway dashboard
+| Location | Setting | Purpose |
+|---|---|---|
+| Vercel | `VITE_BACKEND_URL` | Public HTTPS Render backend origin, supplied at build time. |
+| Render | `SPRING_DATASOURCE_URL` | Neon PostgreSQL JDBC connection URL. |
+| Render | `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | Database credentials. |
+| Render | `REDIS_URL` | Hosted Redis URL; `rediss://` enables TLS. |
+| Render | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_SSL` | Alternative to a Redis URL. |
+| Render | `CORS_ORIGINS` | Comma-separated frontend origins allowed for HTTP and WebSocket connections. |
+| Render | `WS_URL` | Optional public WebSocket URL. Leave unset to derive it from `VITE_BACKEND_URL`. |
+| Render | `MAX_BOARD_EVENTS` | Event-history limit per room; default 50,000 commands. |
 
-### Frontend → Vercel
-- Connects to GitHub repo, auto-detects Vite
-- Single environment variable: `VITE_BACKEND_URL` pointing to Railway backend URL
+Use `frontend` as the Vercel root, `npm run build` as its build command, and `dist` as its output directory. Use `backend` as the Render Docker build context. The backend supports a platform-provided `PORT`.
 
-### Environment Variables (Backend)
+`GET /api/rooms/health` checks liveness. `GET /api/rooms/ready` checks PostgreSQL and Redis connectivity.
 
-| Variable | Description |
-|---|---|
-| `SPRING_DATASOURCE_URL` | PostgreSQL JDBC URL |
-| `SPRING_DATASOURCE_USERNAME` | Database username |
-| `SPRING_DATASOURCE_PASSWORD` | Database password |
-| `REDIS_URL` | Redis connection URL |
-| `WS_URL` | Public WebSocket URL returned to clients |
-| `CORS_ORIGINS` | Allowed frontend origin (your Vercel URL) |
+Deploy protocol changes **backend first, then frontend**, and refresh existing browser tabs. Existing room columns are preserved; this update does not require a destructive schema migration. See the [deployment guide](docs/DEPLOYMENT.md) for compatibility and smoke tests.
 
----
+## Tests and quality checks
 
-## What I'd Build Next
+```sh
+# From frontend/
+npm run lint
+npm test
+npm run build
+npx playwright install chromium
+npm run test:e2e
+```
 
-- **Auth** — JWT login so rooms persist across sessions per user
-- **Mobile drawing** — Touch/pointer events for tablet support
-- **Synced undo/redo** — Currently undo is local; syncing requires a shared inverse event log
-- **Cursor presence** — Broadcast each user's cursor position on a separate low-frequency topic
-- **Named boards** — Let users save and revisit whiteboards by name
+If Chrome is already installed, `PLAYWRIGHT_CHANNEL=chrome npm run test:e2e` can be used instead of downloading Chromium on macOS/Linux.
 
+```sh
+# From backend/
+./mvnw verify
+```
 
----
+Coverage includes history beyond the old 2,000-event limit, clear/rejoin behavior, reconnect synchronization, duplicate events, ownership checks, expiry, storage failures, and concurrent event ordering. Browser tests exercise create/join, drawing across two tabs, shared undo/redo, clear, reload, and disabled drawing before synchronization.
 
-*Java · Spring Boot 3.2 · WebSocket · STOMP · Redis · PostgreSQL · React · TypeScript · Docker · Railway · Vercel*
+The backend transport test uses real HTTP/WebSocket connections with mocked storage; browser tests use a simulated STOMP server. Production storage connectivity and capacity require separate deployment checks.
+
+The GitHub Actions workflow runs frontend lint, tests, build, browser tests, and backend verification.
+
+## Project structure
+
+```text
+SketchRoom/
+├── frontend/
+│   ├── src/pages/                 # Landing page and room orchestration
+│   ├── src/components/            # Canvas, toolbar, and active UI primitives
+│   ├── src/hooks/useWhiteboard.ts # Connection lifecycle and synchronization
+│   ├── src/lib/                   # API requests and drawing-history helpers
+│   ├── src/types/                 # Shared frontend event contracts
+│   └── e2e/                       # Browser workflow tests
+├── backend/
+│   ├── src/main/java/com/sketchroom/
+│   │   ├── controller/            # HTTP and STOMP handlers
+│   │   ├── service/               # Room lifecycle, ordering, persistence
+│   │   ├── model/                 # Room entity
+│   │   ├── repository/            # PostgreSQL access
+│   │   ├── dto/                   # Request, response, and event contracts
+│   │   └── config/                # Redis, WebSocket, and CORS configuration
+│   └── src/test/                  # Service, configuration, and transport tests
+├── docs/                         # Code walkthrough and deployment instructions
+└── .github/workflows/             # Automated verification
+```
+
+## Current boundaries
+
+- One backend instance; Spring's simple broker and room locks are local to that process.
+- Rooms are shared through their code, with no account-based access control.
+- Undo ownership belongs to the current WebSocket session and resets on reconnect.
+- The canvas is fixed at 3000 × 2000; drawing is disabled while disconnected or synchronizing.
+- Redis/backend loss before a successful PostgreSQL checkpoint can lose recent work. Backups and Redis persistence remain important.
+- The 50,000-command limit protects retained history; production-scale capacity has not been benchmarked.
+
+## Future improvements
+
+- User accounts, private rooms, and role-based access.
+- Named boards that users can save and revisit.
+- Text, shapes, image uploads, and PNG/PDF export.
+- Participant cursors and collaborator identities.
+- Zoom, pan, and a larger or infinite canvas.
+- Undo ownership that survives reconnects through authenticated identities.
+- Compact checkpoints and offline reconciliation for longer sessions.
+- A shared external message broker and distributed coordination for multiple backend instances.
+- Load testing, operational metrics, and alerts for storage or synchronization failures.
+
+## Explore the implementation
+
+For the exact function calls behind a button click or drawing action, read the [beginner-friendly code walkthrough](docs/CODE_WALKTHROUGH.md). It explains callbacks, refs, snapshots, toasts, rendering, and persistence using the actual source files.

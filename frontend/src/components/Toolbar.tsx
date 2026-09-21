@@ -15,12 +15,15 @@ interface ToolbarProps {
   setBrushSize: (s: number) => void;
   isEraser: boolean;
   setIsEraser: (e: boolean) => void;
+  disabled: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
   onClear: () => void;
   onUndo: () => void;
   onRedo: () => void;
 }
 
-export default function Toolbar({ color, setColor, brushSize, setBrushSize, isEraser, setIsEraser, onClear, onUndo, onRedo }: ToolbarProps) {
+export default function Toolbar({ color, setColor, brushSize, setBrushSize, isEraser, setIsEraser, onClear, onUndo, onRedo, disabled, canUndo, canRedo }: ToolbarProps) {
   return (
     <div className="flex h-full w-16 flex-col items-center gap-5 bg-toolbar py-6">
       {/* Colors */}
@@ -28,6 +31,7 @@ export default function Toolbar({ color, setColor, brushSize, setBrushSize, isEr
         {PRESET_COLORS.map((c) => (
           <button
             key={c}
+            aria-label={`Choose color ${c}`}
             onClick={() => { setColor(c); setIsEraser(false); }}
             className={cn(
               "h-7 w-7 rounded-full border-2 transition-transform hover:scale-110",
@@ -43,6 +47,7 @@ export default function Toolbar({ color, setColor, brushSize, setBrushSize, isEr
         <span className="text-[10px] text-toolbar-foreground/60">Size</span>
         <Slider
           orientation="vertical"
+          aria-label="Brush size"
           min={1}
           max={20}
           step={1}
@@ -60,22 +65,23 @@ export default function Toolbar({ color, setColor, brushSize, setBrushSize, isEr
         className={cn("text-toolbar-foreground", isEraser && "bg-primary text-primary-foreground")}
         onClick={() => setIsEraser(!isEraser)}
         title="Eraser"
+        aria-label="Eraser"
       >
         <Eraser className="h-5 w-5" />
       </Button>
 
       {/* Undo / Redo */}
       <div className="flex flex-col gap-1">
-        <Button size="icon" variant="ghost" className="text-toolbar-foreground" onClick={onUndo} title="Undo">
+        <Button size="icon" variant="ghost" className="text-toolbar-foreground" disabled={disabled || !canUndo} onClick={onUndo} title="Undo" aria-label="Undo">
           <Undo2 className="h-5 w-5" />
         </Button>
-        <Button size="icon" variant="ghost" className="text-toolbar-foreground" onClick={onRedo} title="Redo">
+        <Button size="icon" variant="ghost" className="text-toolbar-foreground" disabled={disabled || !canRedo} onClick={onRedo} title="Redo" aria-label="Redo">
           <Redo2 className="h-5 w-5" />
         </Button>
       </div>
 
       {/* Clear */}
-      <Button size="icon" variant="ghost" className="text-toolbar-foreground hover:text-destructive" onClick={onClear} title="Clear canvas">
+      <Button size="icon" variant="ghost" className="text-toolbar-foreground hover:text-destructive" disabled={disabled} onClick={onClear} title="Clear canvas" aria-label="Clear canvas">
         <Trash2 className="h-5 w-5" />
       </Button>
     </div>

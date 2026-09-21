@@ -32,3 +32,10 @@ coverage/
 # Temporary files
 *.tmp
 *.temp
+
+# Browser test reports
+frontend/playwright-report/
+frontend/test-results/
+
+#docs
+/docs

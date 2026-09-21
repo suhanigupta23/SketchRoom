@@ -1,222 +1,315 @@
 package com.sketchroom.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sketchroom.dto.DrawEvent;
 import com.sketchroom.dto.RoomDtos.*;
 import com.sketchroom.model.Room;
 import com.sketchroom.repository.RoomRepository;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+/** Single-instance room coordinator. All operations for a room use the same lock. */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class RoomService {
-
     private final RoomRepository roomRepository;
     private final RedisTemplate<String, String> redisTemplate;
     private final ObjectMapper objectMapper;
+    private final SimpMessagingTemplate messagingTemplate;
 
-    @Value("${app.websocket.url:ws://localhost:8080/ws}")
+    @Value("${app.websocket.url:}")
     private String wsBaseUrl;
+    @Value("${app.board.max-events:50000}")
+    private int maxEvents = 50_000;
 
-    // Redis key patterns
-    private static final String ROOM_MEMBERS_KEY = "room:members:";
-    private static final String ROOM_EVENTS_KEY  = "room:events:";
-
-    // Room key generation settings
-    private static final String KEY_CHARS =
-        "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    private static final int KEY_LENGTH = 6;
+    private static final String MEMBERS = "room:members:";
+    private static final String EVENTS = "room:events:";
+    private static final String KEY_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private final Map<String, Board> boards = new ConcurrentHashMap<>();
+    private final Object[] locks = java.util.stream.IntStream.range(0, 128)
+            .mapToObj(i -> new Object()).toArray();
 
-    // ── Create Room ───────────────────────────────────────────────────
+    private static class Board {
+        final Room room;
+        final List<DrawEvent> events = new ArrayList<>();
+        final Set<String> eventIds = new HashSet<>();
+        final Map<String, String> strokeOwners = new HashMap<>();
+        final Set<String> sessions = new HashSet<>();
+        long sequence;
+        boolean dirty;
+        Board(Room room) { this.room = room; }
+    }
+
+    public String normalizeRoomCode(String code) {
+        if (code == null || !code.trim().matches("(?i)[A-Z0-9]{6}")) {
+            throw new IllegalArgumentException("Enter a six-character room code.");
+        }
+        return code.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private Object lock(String code) {
+        return locks[Math.floorMod(code.hashCode(), locks.length)];
+    }
 
     public CreateRoomResponse createRoom() {
-        String roomKey = generateUniqueKey();
-
-        Room room = Room.builder()
-                .roomKey(roomKey)
-                .build();
-        roomRepository.save(room);
-
-        // Initialize empty members set in Redis with 24h TTL
-        String membersKey = ROOM_MEMBERS_KEY + roomKey;
-        redisTemplate.opsForSet().add(membersKey, "placeholder");
-        redisTemplate.opsForSet().remove(membersKey, "placeholder");
-        redisTemplate.expire(membersKey, 24, TimeUnit.HOURS);
-
-        log.info("Created room: {}", roomKey);
-
-        return CreateRoomResponse.builder()
-                .roomCode(roomKey)
-                .wsUrl(wsBaseUrl)
-                .canvasSnapshot(null)
-                .connectedUsers(0)
-                .build();
-    }
-
-    // ── Join Room ─────────────────────────────────────────────────────
-
-    public JoinRoomResponse joinRoom(String roomCode) {
-        Optional<Room> roomOpt =
-            roomRepository.findByRoomKeyAndActiveTrue(
-                roomCode.toUpperCase());
-
-        if (roomOpt.isEmpty()) {
-            return JoinRoomResponse.builder()
-                    .success(false)
-                    .message("Room not found or expired.")
-                    .build();
-        }
-
-        Room room = roomOpt.get();
-        int connectedUsers = getConnectedUserCount(roomCode);
-
-        // Fetch live events directly from Redis instead of waiting for 30s postgres snapshot
-        String eventsKey = ROOM_EVENTS_KEY + roomCode.toUpperCase();
-        List<String> events = redisTemplate.opsForList().range(eventsKey, 0, -1);
-        String liveSnapshot = room.getCanvasSnapshot();
-        if (events != null && !events.isEmpty()) {
-            liveSnapshot = "[" + String.join(",", events) + "]";
-        }
-
-        log.info("User joining room: {} ({} users currently)",
-            roomCode, connectedUsers);
-
-        return JoinRoomResponse.builder()
-                .roomCode(room.getRoomKey())
-                .wsUrl(wsBaseUrl)
-                .canvasSnapshot(liveSnapshot)
-                .connectedUsers(connectedUsers)
-                .success(true)
-                .message("Joined successfully")
-                .build();
-    }
-
-    // ── Session Tracking ──────────────────────────────────────────────
-
-    public void addUserToRoom(String roomKey, String sessionId) {
-        String key = ROOM_MEMBERS_KEY + roomKey;
-        redisTemplate.opsForSet().add(key, sessionId);
-        redisTemplate.expire(key, 24, TimeUnit.HOURS);
-        log.info("Session {} joined room {}", sessionId, roomKey);
-    }
-
-    public void removeUserFromRoom(String roomKey, String sessionId) {
-        String key = ROOM_MEMBERS_KEY + roomKey;
-        redisTemplate.opsForSet().remove(key, sessionId);
-        log.info("Session {} left room {}", sessionId, roomKey);
-    }
-
-    public int getConnectedUserCount(String roomKey) {
-        Long count = redisTemplate.opsForSet()
-            .size(ROOM_MEMBERS_KEY + roomKey);
-        return count != null ? count.intValue() : 0;
-    }
-
-    // ── Draw Event Buffering ──────────────────────────────────────────
-
-    @Async
-    public void appendDrawEvent(String roomKey, DrawEvent event) {
-        try {
-            // If it's a clear event, wipe the entire buffer
-            // No point keeping old draw events after a clear
-            if ("clear".equals(event.getType())) {
-                redisTemplate.delete(ROOM_EVENTS_KEY + roomKey);
-                return;
+        // A unique database constraint remains the final guard against collisions.
+        for (int attempt = 0; attempt < 100; attempt++) {
+            StringBuilder code = new StringBuilder();
+            for (int i = 0; i < 6; i++) code.append(KEY_CHARS.charAt(RANDOM.nextInt(KEY_CHARS.length())));
+            if (roomRepository.existsByRoomKey(code.toString())) continue;
+            try {
+                Room room = roomRepository.saveAndFlush(Room.builder().roomKey(code.toString()).build());
+                return CreateRoomResponse.builder().roomCode(room.getRoomKey()).wsUrl(wsBaseUrl)
+                        .canvasSnapshot(null).connectedUsers(0).build();
+            } catch (org.springframework.dao.DataIntegrityViolationException e) {
+                if (!roomRepository.existsByRoomKey(code.toString())) throw e;
             }
+        }
+        throw new IllegalStateException("Could not allocate a room code. Please try again.");
+    }
 
-            String eventsKey = ROOM_EVENTS_KEY + roomKey;
-            String json = objectMapper.writeValueAsString(event);
-            redisTemplate.opsForList().rightPush(eventsKey, json);
+    public void validateRoom(String input) {
+        String code = normalizeRoomCode(input);
+        synchronized (lock(code)) { board(code); }
+    }
 
-            // Keep only the last 2000 events per room
-            redisTemplate.opsForList().trim(eventsKey, -2000, -1);
-            redisTemplate.expire(eventsKey, 24, TimeUnit.HOURS);
+    public JoinRoomResponse joinRoom(String input) { return joinRoom(input, true); }
 
-        } catch (Exception e) {
-            log.warn("Failed to buffer draw event for room {}: {}",
-                roomKey, e.getMessage());
+    public JoinRoomResponse joinRoom(String input, boolean includeSnapshot) {
+        String code = normalizeRoomCode(input);
+        synchronized (lock(code)) {
+            Board board;
+            try { board = board(code); }
+            catch (NoSuchElementException e) {
+                return JoinRoomResponse.builder().success(false).message(e.getMessage()).build();
+            }
+            return JoinRoomResponse.builder().roomCode(code).wsUrl(wsBaseUrl)
+                    .canvasSnapshot(includeSnapshot ? json(board.events) : null).connectedUsers(board.sessions.size())
+                    .success(true).message("Joined successfully").build();
         }
     }
 
-    // ── Periodic Snapshot Save (every 30 seconds) ─────────────────────
+    /** Called after subscriptions exist, on both the first connection and reconnects. */
+    public BoardSnapshot joinSession(String input, String sessionId) {
+        String code = normalizeRoomCode(input);
+        synchronized (lock(code)) {
+            Board board = board(code);
+            redisTemplate.opsForSet().add(MEMBERS + code, sessionId);
+            redisTemplate.expire(MEMBERS + code, 24, TimeUnit.HOURS);
+            board.sessions.add(sessionId);
+            publishCount(code, board);
+            return new BoardSnapshot(code, List.copyOf(board.events), board.sequence,
+                    sessionId, board.sessions.size());
+        }
+    }
+
+    public void removeUserFromRoom(String code, String sessionId) {
+        synchronized (lock(code)) {
+            Board board = boards.get(code);
+            if (board == null || !board.sessions.remove(sessionId)) return;
+            try { redisTemplate.opsForSet().remove(MEMBERS + code, sessionId); }
+            catch (RuntimeException e) { log.warn("Presence cleanup failed for {}", code, e); }
+            publishCount(code, board);
+            // Save before releasing the last in-memory copy. Retry via the scheduled job on failure.
+            if (board.sessions.isEmpty()) {
+                try {
+                    saveSnapshot(board);
+                    boards.remove(code);
+                } catch (RuntimeException e) { log.warn("Final snapshot failed for {}", code, e); }
+            }
+        }
+    }
+
+    public int getConnectedUserCount(String input) {
+        String code = normalizeRoomCode(input);
+        synchronized (lock(code)) {
+            Board board = boards.get(code);
+            return board == null ? 0 : board.sessions.size();
+        }
+    }
+
+    public void applyEvent(String input, String sessionId, DrawEvent event) {
+        String code = normalizeRoomCode(input);
+        synchronized (lock(code)) {
+            Board board = board(code);
+            if (!board.sessions.contains(sessionId)) throw new IllegalArgumentException("Join this room before drawing.");
+            validate(event);
+            if (event.getEventId() == null) event.setEventId(UUID.randomUUID().toString()); // Older clients.
+            if (board.eventIds.contains(event.getEventId())) return;
+            if (!"clear".equals(event.getType()) && board.events.size() >= maxEvents) {
+                throw new IllegalArgumentException("This board is full. Create a new room or clear the board to continue.");
+            }
+            if ("draw".equals(event.getType()) && event.getStrokeId() == null) {
+                event.setStrokeId(UUID.randomUUID().toString());
+            }
+            if ("undo".equals(event.getType()) || "redo".equals(event.getType())) {
+                if (!sessionId.equals(board.strokeOwners.get(event.getStrokeId()))) {
+                    throw new IllegalArgumentException("Only your strokes from this connection can be undone.");
+                }
+            } else if ("draw".equals(event.getType())) {
+                String owner = board.strokeOwners.get(event.getStrokeId());
+                if (owner != null && !sessionId.equals(owner)) throw new IllegalArgumentException("Stroke belongs to another connection.");
+            }
+            event.setAuthorId(sessionId);
+            event.setSequence(board.sequence + 1);
+            // Persist before broadcasting. Failed writes never silently become accepted drawing.
+            redisTemplate.opsForList().rightPush(EVENTS + code, json(event));
+            // The append is the commit point; a TTL refresh failure must not roll back the sequence.
+            try { redisTemplate.expire(EVENTS + code, 24, TimeUnit.HOURS); }
+            catch (RuntimeException e) { log.warn("Event TTL refresh failed for {}", code, e); }
+            board.sequence = event.getSequence();
+            if ("clear".equals(event.getType())) {
+                board.events.clear();
+                board.eventIds.clear();
+                board.strokeOwners.clear();
+            }
+            board.events.add(event);
+            board.eventIds.add(event.getEventId());
+            if ("draw".equals(event.getType())) board.strokeOwners.put(event.getStrokeId(), sessionId);
+            board.dirty = true;
+            if ("clear".equals(event.getType())) {
+                // Keep the clear marker in Redis even if PostgreSQL is temporarily unavailable.
+                try {
+                    saveSnapshot(board);
+                    redisTemplate.opsForList().trim(EVENTS + code, -1, -1);
+                } catch (RuntimeException e) { log.warn("Clear checkpoint will be retried for {}", code, e); }
+            }
+            messagingTemplate.convertAndSend("/topic/room/" + code, event);
+        }
+    }
+
+    private void validate(DrawEvent event) {
+        if (event == null || event.getType() == null || !Set.of("draw", "clear", "undo", "redo").contains(event.getType())) {
+            throw new IllegalArgumentException("Unsupported drawing command.");
+        }
+        if (event.getEventId() != null && !event.getEventId().matches("[A-Za-z0-9-]{1,80}")) {
+            throw new IllegalArgumentException("Invalid event identifier.");
+        }
+        if (event.getStrokeId() != null && !event.getStrokeId().matches("[A-Za-z0-9-]{1,80}")) {
+            throw new IllegalArgumentException("Invalid stroke identifier.");
+        }
+        if (Set.of("undo", "redo").contains(event.getType()) && event.getStrokeId() == null) {
+            throw new IllegalArgumentException("A stroke identifier is required.");
+        }
+        if ("draw".equals(event.getType()) && (!coordinate(event.getX(), 3000) || !coordinate(event.getPrevX(), 3000)
+                || !coordinate(event.getY(), 2000) || !coordinate(event.getPrevY(), 2000)
+                || event.getSize() == null || event.getSize() < 1 || event.getSize() > 20
+                || event.getColor() == null || !event.getColor().matches("#[0-9a-fA-F]{6}")
+                || event.getIsEraser() == null)) {
+            throw new IllegalArgumentException("Invalid coordinates, color, or brush size.");
+        }
+    }
+
+    private boolean coordinate(Double value, int max) {
+        return value != null && Double.isFinite(value) && value >= 0 && value <= max;
+    }
+
+    private Board board(String code) {
+        Board existing = boards.get(code);
+        if (existing != null) {
+            requireActive(existing.room);
+            return existing;
+        }
+        Room room = roomRepository.findByRoomKeyAndActiveTrue(code)
+                .orElseThrow(() -> new NoSuchElementException("Room not found or expired."));
+        requireActive(room);
+        Board board = new Board(room);
+        List<String> live = redisTemplate.opsForList().range(EVENTS + code, 0, -1);
+        try {
+            List<DrawEvent> history = live != null && !live.isEmpty()
+                    ? objectMapper.readValue("[" + String.join(",", live) + "]", new TypeReference<>() {})
+                    : room.getCanvasSnapshot() == null ? List.of()
+                    : objectMapper.readValue(room.getCanvasSnapshot(), new TypeReference<>() {});
+            for (DrawEvent event : history) {
+                // Upgrade existing snapshots without changing the database schema.
+                board.sequence = Math.max(board.sequence + 1, event.getSequence() == null ? 0 : event.getSequence());
+                event.setSequence(board.sequence);
+                if (event.getEventId() == null) event.setEventId(UUID.randomUUID().toString());
+                if ("clear".equals(event.getType())) { board.events.clear(); board.eventIds.clear(); board.strokeOwners.clear(); }
+                board.events.add(event);
+                board.eventIds.add(event.getEventId());
+                if (event.getStrokeId() != null && event.getAuthorId() != null) board.strokeOwners.put(event.getStrokeId(), event.getAuthorId());
+            }
+        } catch (Exception e) { throw new IllegalStateException("Unable to load the saved board.", e); }
+        // Rehydrate Redis before accepting new events, otherwise an old checkpoint could be lost.
+        if ((live == null || live.isEmpty()) && !board.events.isEmpty()) {
+            redisTemplate.opsForList().rightPushAll(EVENTS + code, board.events.stream().map(this::json).toList());
+            redisTemplate.expire(EVENTS + code, 24, TimeUnit.HOURS);
+        }
+        board.dirty = !board.events.isEmpty();
+        redisTemplate.delete(MEMBERS + code); // Remove stale sessions from an earlier server process.
+        boards.put(code, board);
+        return board;
+    }
+
+    private void requireActive(Room room) {
+        if (!room.isActive() || !room.getExpiresAt().isAfter(LocalDateTime.now())) {
+            throw new NoSuchElementException("Room not found or expired.");
+        }
+    }
+
+    private String json(Object value) {
+        try { return objectMapper.writeValueAsString(value); }
+        catch (Exception e) { throw new IllegalStateException("Unable to serialize board.", e); }
+    }
+
+    private void publishCount(String code, Board board) {
+        messagingTemplate.convertAndSend("/topic/room/" + code + "/users", Map.of("connectedUsers", board.sessions.size()));
+    }
+
+    private void saveSnapshot(Board board) {
+        if (!board.dirty) return;
+        if (!board.room.getExpiresAt().isAfter(LocalDateTime.now())) board.room.setActive(false);
+        board.room.setCanvasSnapshot(json(board.events));
+        board.room.setSnapshotUpdatedAt(LocalDateTime.now());
+        roomRepository.saveAndFlush(board.room);
+        board.dirty = false;
+    }
+
+    @PreDestroy
+    public void flushOnShutdown() { saveCanvasSnapshots(); }
 
     @Scheduled(fixedDelay = 30_000)
     public void saveCanvasSnapshots() {
-        Set<String> keys = redisTemplate.keys(ROOM_EVENTS_KEY + "*");
-        if (keys == null || keys.isEmpty()) return;
-
-        for (String eventsKey : keys) {
-            String roomKey = eventsKey.replace(ROOM_EVENTS_KEY, "");
-            try {
-                List<String> events =
-                    redisTemplate.opsForList().range(eventsKey, 0, -1);
-                if (events == null || events.isEmpty()) continue;
-
-                String snapshot = "[" + String.join(",", events) + "]";
-
-                roomRepository
-                    .findByRoomKeyAndActiveTrue(roomKey)
-                    .ifPresent(room -> {
-                        room.setCanvasSnapshot(snapshot);
-                        room.setSnapshotUpdatedAt(LocalDateTime.now());
-                        roomRepository.save(room);
-                        log.info("Saved snapshot for room {} ({} events)",
-                            roomKey, events.size());
-                    });
-
-            } catch (Exception e) {
-                log.error("Snapshot save failed for room {}: {}",
-                    roomKey, e.getMessage());
+        for (String code : List.copyOf(boards.keySet())) {
+            synchronized (lock(code)) {
+                Board board = boards.get(code);
+                if (board == null) continue;
+                try {
+                    saveSnapshot(board);
+                    if (board.sessions.isEmpty()) boards.remove(code);
+                } catch (RuntimeException e) { log.error("Snapshot save failed for {}", code, e); }
             }
         }
     }
 
-    // ── Cleanup Expired Rooms (every hour) ────────────────────────────
-
-    @Scheduled(fixedDelay = 3_600_000)
+    @Scheduled(fixedDelay = 60_000)
     public void cleanupExpiredRooms() {
-        int count = roomRepository
-            .deactivateExpiredRooms(LocalDateTime.now());
-        if (count > 0) {
-            log.info("Deactivated {} expired rooms", count);
-        }
-    }
-
-    // ── Room Key Generation ───────────────────────────────────────────
-
-    private String generateUniqueKey() {
-        String key;
-        int attempts = 0;
-        do {
-            key = generateKey();
-            attempts++;
-            if (attempts > 100) {
-                throw new RuntimeException(
-                    "Could not generate unique room key after 100 attempts");
+        roomRepository.deactivateExpiredRooms(LocalDateTime.now());
+        for (String code : List.copyOf(boards.keySet())) {
+            synchronized (lock(code)) {
+                Board board = boards.get(code);
+                if (board != null && !board.room.getExpiresAt().isAfter(LocalDateTime.now())) {
+                    messagingTemplate.convertAndSend("/topic/room/" + code + "/status", Map.of("expired", true));
+                    boards.remove(code);
+                    redisTemplate.delete(List.of(EVENTS + code, MEMBERS + code));
+                }
             }
-        } while (roomRepository.existsByRoomKey(key));
-        return key;
-    }
-
-    private String generateKey() {
-        StringBuilder sb = new StringBuilder(KEY_LENGTH);
-        for (int i = 0; i < KEY_LENGTH; i++) {
-            sb.append(KEY_CHARS.charAt(
-                RANDOM.nextInt(KEY_CHARS.length())));
         }
-        return sb.toString();
     }
 }

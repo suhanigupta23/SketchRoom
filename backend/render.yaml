@@ -5,7 +5,7 @@ services:
     rootDir: backend
     dockerfilePath: Dockerfile
     plan: free
-    healthCheckPath: /api/rooms/health
+    healthCheckPath: /api/rooms/ready
     envVars:
       - key: SPRING_DATASOURCE_URL
         sync: false # You will paste your Neon connection string here

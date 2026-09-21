@@ -4,6 +4,9 @@ import lombok.*;
 
 public class RoomDtos {
 
+    public record BoardSnapshot(String roomCode, java.util.List<DrawEvent> events,
+                                long sequence, String sessionId, int connectedUsers) {}
+
     // ── What the frontend sends when joining a room ──────────────────
     // POST /api/rooms/join body: { "roomCode": "ABC123" }
     @Getter
