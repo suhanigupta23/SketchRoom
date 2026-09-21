@@ -51,6 +51,7 @@ public class RoomService {
         final Map<String, String> strokeOwners = new HashMap<>();
         final Set<String> sessions = new HashSet<>();
         long sequence;
+        long nextEventExpiryRefresh;
         boolean dirty;
         Board(Room room) { this.room = room; }
     }
@@ -170,8 +171,7 @@ public class RoomService {
             // Persist before broadcasting. Failed writes never silently become accepted drawing.
             redisTemplate.opsForList().rightPush(EVENTS + code, json(event));
             // The append is the commit point; a TTL refresh failure must not roll back the sequence.
-            try { redisTemplate.expire(EVENTS + code, 24, TimeUnit.HOURS); }
-            catch (RuntimeException e) { log.warn("Event TTL refresh failed for {}", code, e); }
+            refreshEventExpiry(code, board);
             board.sequence = event.getSequence();
             if ("clear".equals(event.getType())) {
                 board.events.clear();
@@ -190,6 +190,57 @@ public class RoomService {
                 } catch (RuntimeException e) { log.warn("Clear checkpoint will be retried for {}", code, e); }
             }
             messagingTemplate.convertAndSend("/topic/room/" + code, event);
+        }
+    }
+
+    /** One Redis round trip for a short group of segments; broadcast only after commit. */
+    public void applyDrawBatch(String input, String sessionId, List<DrawEvent> incoming) {
+        if (incoming == null || incoming.isEmpty() || incoming.size() > 32) {
+            throw new IllegalArgumentException("A drawing batch must contain 1 to 32 segments.");
+        }
+        String code = normalizeRoomCode(input);
+        synchronized (lock(code)) {
+            Board board = board(code);
+            if (!board.sessions.contains(sessionId)) throw new IllegalArgumentException("Join this room before drawing.");
+            List<DrawEvent> accepted = new ArrayList<>();
+            Set<String> ids = new HashSet<>();
+            for (DrawEvent event : incoming) {
+                validate(event);
+                if (!"draw".equals(event.getType())) throw new IllegalArgumentException("Only drawing segments may be batched.");
+                if (event.getEventId() == null) event.setEventId(UUID.randomUUID().toString());
+                if (board.eventIds.contains(event.getEventId()) || !ids.add(event.getEventId())) continue;
+                if (event.getStrokeId() == null) event.setStrokeId(UUID.randomUUID().toString());
+                String owner = board.strokeOwners.get(event.getStrokeId());
+                if (owner != null && !sessionId.equals(owner)) throw new IllegalArgumentException("Stroke belongs to another connection.");
+                event.setAuthorId(sessionId);
+                event.setSequence(board.sequence + accepted.size() + 1);
+                accepted.add(event);
+            }
+            if (accepted.isEmpty()) return;
+            if (board.events.size() + accepted.size() > maxEvents) throw new IllegalArgumentException("This board is full. Create a new room or clear the board to continue.");
+            redisTemplate.opsForList().rightPushAll(EVENTS + code, accepted.stream().map(this::json).toList());
+            refreshEventExpiry(code, board);
+            for (DrawEvent event : accepted) {
+                board.events.add(event);
+                board.eventIds.add(event.getEventId());
+                board.strokeOwners.put(event.getStrokeId(), sessionId);
+                board.sequence = event.getSequence();
+            }
+            board.dirty = true;
+            for (DrawEvent event : accepted) messagingTemplate.convertAndSend("/topic/room/" + code, event);
+        }
+    }
+
+    private void refreshEventExpiry(String code, Board board) {
+        // Refresh once per minute, not for every pointer segment. Each synchronous
+        // Redis request adds network latency while this room's drawing queue waits.
+        long now = System.nanoTime();
+        if (board.nextEventExpiryRefresh == 0 || now - board.nextEventExpiryRefresh >= 0) {
+            try {
+                if (Boolean.TRUE.equals(redisTemplate.expire(EVENTS + code, 24, TimeUnit.HOURS))) {
+                    board.nextEventExpiryRefresh = now + TimeUnit.MINUTES.toNanos(1);
+                }
+            } catch (RuntimeException e) { log.warn("Event TTL refresh failed for {}", code, e); }
         }
     }
 

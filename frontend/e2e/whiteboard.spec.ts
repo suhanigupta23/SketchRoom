@@ -5,6 +5,7 @@ import type { DrawEvent } from "../src/types/whiteboard";
 class RoomServer {
   events: DrawEvent[] = [];
   sequence = 0;
+  holdDrawings = false;
   peers: Array<{ socket: WebSocketRoute; subscriptions: Map<string, string>; id: string; joined: boolean }> = [];
 
   async attach(page: Page) {
@@ -30,11 +31,13 @@ class RoomServer {
               sequence: this.sequence, sessionId: peer.id, connectedUsers: this.peers.filter(p => p.joined).length });
             this.broadcast("/topic/room/ABC234/users", { connectedUsers: this.peers.filter(p => p.joined).length });
           } else {
-            const event = JSON.parse(frame.slice(frame.indexOf("\n\n") + 2).replace(/\0$/, "")) as DrawEvent;
+            const payload = JSON.parse(frame.slice(frame.indexOf("\n\n") + 2).replace(/\0$/, "")) as DrawEvent | DrawEvent[];
+            for (const event of Array.isArray(payload) ? payload : [payload]) {
             event.authorId = peer.id; event.sequence = ++this.sequence;
             if (event.type === "clear") this.events = [];
             this.events.push(event);
-            this.broadcast("/topic/room/ABC234", event);
+            if (!this.holdDrawings) this.broadcast("/topic/room/ABC234", event);
+            }
           }
         }
         if (frame.startsWith("DISCONNECT\n")) {
@@ -103,4 +106,28 @@ test("drawing stays disabled before synchronization", async ({ page }) => {
   await page.goto("/room/ABC234");
   await expect(page.getByLabel("Shared drawing canvas")).toHaveAttribute("aria-disabled", "true");
   await expect(page.getByRole("button", { name: "Clear canvas" })).toBeDisabled();
+});
+
+
+test("local stroke is visible before the server acknowledges it", async ({ page }) => {
+  const server = new RoomServer();
+  server.holdDrawings = true;
+  await server.attach(page);
+  await page.goto("/room/ABC234");
+  await expect(page.getByLabel("Shared drawing canvas")).toHaveAttribute("aria-disabled", "false");
+  const bounds = (await page.getByLabel("Shared drawing canvas").boundingBox())!;
+  await page.mouse.move(bounds.x + 100, bounds.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + 150, bounds.y + 100, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => page.getByLabel("Shared drawing canvas").evaluate(canvas =>
+    (canvas as HTMLCanvasElement).getContext("2d")!.getImageData(125, 100, 1, 1).data[3]
+  ), { timeout: 1000 }).toBeGreaterThan(0);
+  expect(await alphaAt(page, 125, 100)).toBe(0);
+  server.holdDrawings = false;
+  for (const event of [...server.events]) server.broadcast("/topic/room/ABC234", event);
+  await expect.poll(() => alphaAt(page, 125, 100)).toBeGreaterThan(0);
+  await expect.poll(() => page.getByLabel("Shared drawing canvas").evaluate(canvas =>
+    (canvas as HTMLCanvasElement).getContext("2d")!.getImageData(125, 100, 1, 1).data[3]
+  )).toBe(0);
 });

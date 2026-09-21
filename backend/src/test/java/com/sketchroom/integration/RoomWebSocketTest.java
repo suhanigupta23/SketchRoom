@@ -69,6 +69,10 @@ class RoomWebSocketTest {
             assertEquals(2, bob.receive("snapshot").get("connectedUsers").asInt());
             alice.send("/app/draw/ABC234", "{\"type\":\"draw\",\"eventId\":\"first\",\"strokeId\":\"stroke\",\"x\":20,\"y\":30,\"prevX\":10,\"prevY\":15,\"color\":\"#123456\",\"size\":4,\"isEraser\":false}");
             assertEquals(1, bob.receive("events").get("sequence").asLong());
+            String segment = "{\"type\":\"draw\",\"eventId\":\"batch-one\",\"strokeId\":\"stroke\",\"x\":30,\"y\":30,\"prevX\":20,\"prevY\":30,\"color\":\"#123456\",\"size\":4,\"isEraser\":false}";
+            alice.send("/app/draw-batch/ABC234", "[" + segment + "," + segment.replace("batch-one", "batch-two") + "]");
+            assertEquals(2, bob.receive("events").get("sequence").asLong());
+            assertEquals(3, bob.receive("events").get("sequence").asLong());
             bob.send("/app/draw/ABC234", "{\"type\":\"undo\",\"eventId\":\"bad-undo\",\"strokeId\":\"stroke\"}");
             assertEquals("INVALID_EVENT", bob.receive("errors").get("error").asText());
             alice.send("/app/draw/ABC234", "{\"type\":\"undo\",\"eventId\":\"undo\",\"strokeId\":\"stroke\"}");
@@ -79,7 +83,7 @@ class RoomWebSocketTest {
                 reconnected.subscribe("snapshot", "/user/queue/snapshot");
                 reconnected.send("/app/join/ABC234", "{}");
                 JsonNode snapshot = reconnected.receive("snapshot");
-                assertEquals(3, snapshot.get("sequence").asLong());
+                assertEquals(5, snapshot.get("sequence").asLong());
                 assertEquals(1, snapshot.get("events").size());
                 assertEquals("clear", snapshot.get("events").get(0).get("type").asText());
             }

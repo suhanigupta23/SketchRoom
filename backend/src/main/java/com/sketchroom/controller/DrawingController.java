@@ -27,6 +27,13 @@ public class DrawingController {
         roomService.applyEvent(roomKey, sessionId, event);
     }
 
+    @MessageMapping("/draw-batch/{roomKey}")
+    public void handleDrawBatch(@DestinationVariable String roomKey, @Payload java.util.List<DrawEvent> events,
+                               @Header("simpSessionId") String sessionId, SimpMessageHeaderAccessor headers) {
+        requireMembership(roomKey, headers);
+        roomService.applyDrawBatch(roomKey, sessionId, events);
+    }
+
     @MessageMapping("/clear/{roomKey}")
     public void handleClearEvent(@DestinationVariable String roomKey, @Header("simpSessionId") String sessionId,
                                  SimpMessageHeaderAccessor headers) {

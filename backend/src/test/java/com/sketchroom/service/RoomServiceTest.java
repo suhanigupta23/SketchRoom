@@ -39,6 +39,7 @@ class RoomServiceTest {
         SetOperations<String, String> sets = mock(SetOperations.class);
         messages = mock(SimpMessagingTemplate.class);
         when(redis.opsForList()).thenReturn(lists);
+        when(redis.expire(anyString(), anyLong(), any(TimeUnit.class))).thenReturn(true);
         when(redis.opsForSet()).thenReturn(sets);
         when(lists.range(anyString(), eq(0L), eq(-1L))).thenAnswer(i -> new ArrayList<>(storage.getOrDefault(i.getArgument(0), List.of())));
         when(lists.rightPush(anyString(), anyString())).thenAnswer(i -> {
@@ -153,6 +154,61 @@ class RoomServiceTest {
         assertThrows(IllegalStateException.class, () -> service.applyEvent("ABC234", "alice", draw("one")));
         verify(messages, never()).convertAndSend(eq("/topic/room/ABC234"), any(Object.class));
         assertEquals(0, service.joinSession("ABC234", "alice").sequence());
+    }
+
+    @Test void drawingBurstPersistsEverySegmentWithoutRefreshingExpiryEveryTime() {
+        service.joinSession("ABC234", "alice");
+        clearInvocations(redis);
+        for (int i = 0; i < 100; i++) service.applyEvent("ABC234", "alice", draw("burst-" + i));
+        verify(lists, times(100)).rightPush(eq("room:events:ABC234"), anyString());
+        verify(redis, times(1)).expire("room:events:ABC234", 24, TimeUnit.HOURS);
+        assertEquals(100, service.joinSession("ABC234", "bob").sequence());
+    }
+
+    @Test void failedExpiryRefreshIsRetriedWithoutLosingAcceptedDrawing() {
+        service.joinSession("ABC234", "alice");
+        when(redis.expire("room:events:ABC234", 24, TimeUnit.HOURS))
+                .thenThrow(new IllegalStateException("Temporary failure")).thenReturn(true);
+        service.applyEvent("ABC234", "alice", draw("one"));
+        service.applyEvent("ABC234", "alice", draw("two"));
+        service.applyEvent("ABC234", "alice", draw("three"));
+        verify(redis, times(2)).expire("room:events:ABC234", 24, TimeUnit.HOURS);
+        assertEquals(3, service.joinSession("ABC234", "bob").sequence());
+    }
+
+    @Test void batchUsesOneWriteAndBroadcastsInOrderAfterStorage() {
+        service.joinSession("ABC234", "alice");
+        clearInvocations(lists, messages);
+        service.applyDrawBatch("ABC234", "alice", List.of(draw("one"), draw("two"), draw("three")));
+        var order = inOrder(lists, messages);
+        order.verify(lists).rightPushAll(eq("room:events:ABC234"), anyCollection());
+        for (long sequence = 1; sequence <= 3; sequence++) {
+            long expected = sequence;
+            order.verify(messages).convertAndSend(eq("/topic/room/ABC234"), argThat((Object value) ->
+                    value instanceof DrawEvent event && event.getSequence() == expected));
+        }
+        verify(lists, never()).rightPush(anyString(), anyString());
+        assertEquals(3, service.joinSession("ABC234", "bob").sequence());
+    }
+
+    @Test void failedBatchDoesNotAdvanceHistoryOrBroadcast() {
+        service.joinSession("ABC234", "alice");
+        clearInvocations(messages);
+        when(lists.rightPushAll(anyString(), anyCollection())).thenThrow(new IllegalStateException("Redis unavailable"));
+        assertThrows(IllegalStateException.class, () -> service.applyDrawBatch("ABC234", "alice", List.of(draw("one"), draw("two"))));
+        verify(messages, never()).convertAndSend(eq("/topic/room/ABC234"), any(Object.class));
+        assertEquals(0, service.joinSession("ABC234", "bob").sequence());
+    }
+
+    @Test void entireBatchIsValidatedBeforeWriting() {
+        service.joinSession("ABC234", "alice");
+        clearInvocations(lists);
+        DrawEvent invalid = draw("bad"); invalid.setX(Double.NaN);
+        assertThrows(IllegalArgumentException.class, () -> service.applyDrawBatch("ABC234", "alice", List.of(draw("one"), invalid)));
+        verify(lists, never()).rightPushAll(anyString(), anyCollection());
+        ReflectionTestUtils.setField(service, "maxEvents", 1);
+        assertThrows(IllegalArgumentException.class, () -> service.applyDrawBatch("ABC234", "alice", List.of(draw("one"), draw("two"))));
+        assertEquals(0, service.joinSession("ABC234", "bob").sequence());
     }
 
     @Test void concurrentEventsHaveOneServerOrder() throws Exception {

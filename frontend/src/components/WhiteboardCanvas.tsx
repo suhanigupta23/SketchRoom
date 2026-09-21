@@ -48,6 +48,8 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(function Whit
   const events = useRef<DrawEvent[]>([]);
   const pending = useRef(new Map<string, DrawEvent>());
   const sessionId = useRef("");
+  const knownStrokes = useRef(new Set<string>());
+  const previewFrame = useRef<number | null>(null);
   const stroke = useRef<{ id: string; pointer: number; sent: Point; current: Point; lastSend: number; color: string; size: number; eraser: boolean } | null>(null);
 
   const updateHistory = useCallback(() => {
@@ -55,7 +57,7 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(function Whit
     onHistoryChange(Boolean(targets.undo), Boolean(targets.redo));
   }, [onHistoryChange]);
 
-  const renderPreview = useCallback(() => {
+  const paintPreview = useCallback(() => {
     const ctx = previewRef.current?.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
@@ -63,6 +65,21 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(function Whit
     const current = stroke.current;
     if (current) drawLine(ctx, { type: "draw", eventId: "preview", prevX: current.sent.x, prevY: current.sent.y,
       x: current.current.x, y: current.current.y, color: current.color, size: current.size, isEraser: current.eraser });
+  }, []);
+
+  // Pointer events and acknowledgements can arrive several times in one frame.
+  // Paint the latest preview once, instead of clearing a large canvas each time.
+  const renderPreview = useCallback(() => {
+    if (previewFrame.current !== null) return;
+    previewFrame.current = requestAnimationFrame(() => {
+      previewFrame.current = null;
+      paintPreview();
+    });
+  }, [paintPreview]);
+
+  useEffect(() => () => {
+    if (previewFrame.current !== null) cancelAnimationFrame(previewFrame.current);
+    previewFrame.current = null;
   }, []);
 
   const redraw = useCallback(() => {
@@ -75,20 +92,25 @@ const WhiteboardCanvas = forwardRef<WhiteboardCanvasHandle, Props>(function Whit
   useImperativeHandle(ref, () => ({
     loadSnapshot(snapshot) {
       events.current = snapshot.events;
+      knownStrokes.current = new Set(snapshot.events.filter(e => e.type === "draw" && e.strokeId).map(e => e.strokeId!));
       sessionId.current = snapshot.sessionId;
       pending.current.clear(); stroke.current = null;
       redraw(); renderPreview(); updateHistory();
     },
     receiveEvent(event) {
       pending.current.delete(event.eventId);
+      const changesHistory = event.type !== "draw" ||
+        (event.authorId === sessionId.current && !!event.strokeId && !knownStrokes.current.has(event.strokeId));
       if (event.type === "clear") {
-        events.current = []; pending.current.clear(); stroke.current = null;
+        events.current = []; pending.current.clear(); stroke.current = null; knownStrokes.current.clear();
       }
       events.current.push(event);
+      if (event.type === "draw" && event.strokeId) knownStrokes.current.add(event.strokeId);
       const ctx = canvasRef.current?.getContext("2d");
       if (event.type === "draw" && ctx) drawLine(ctx, event);
       else redraw();
-      renderPreview(); updateHistory();
+      renderPreview();
+      if (changesHistory) updateHistory();
     },
     undo() {
       const target = historyTargets(events.current, sessionId.current).undo;

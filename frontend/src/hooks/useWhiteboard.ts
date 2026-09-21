@@ -31,6 +31,30 @@ export function useWhiteboard(options: Options) {
     let syncTimer: ReturnType<typeof setTimeout> | undefined;
     let ackTimer: ReturnType<typeof setTimeout> | undefined;
     const awaiting = new Set<string>();
+    let outgoing: DrawEvent[] = [];
+    let sendTimer: ReturnType<typeof setTimeout> | undefined;
+    const resetOutgoing = () => {
+      outgoing = []; awaiting.clear();
+      clearTimeout(sendTimer); sendTimer = undefined;
+      clearTimeout(ackTimer); ackTimer = undefined;
+    };
+    const flush = () => {
+      sendTimer = undefined;
+      if (disposed || !readyRef.current || !client.connected || awaiting.size || !outgoing.length) return;
+      const batch: DrawEvent[] = [outgoing.shift()!];
+      if (batch[0].type === "draw") {
+        while (batch.length < 32 && outgoing[0]?.type === "draw") batch.push(outgoing.shift()!);
+      }
+      for (const event of batch) awaiting.add(event.eventId);
+      ackTimer = setTimeout(() => {
+        ackTimer = undefined;
+        if (awaiting.size && client.connected) synchronize();
+      }, 10_000);
+      try {
+        client.publish({ destination: `/app/${batch[0].type === "draw" ? "draw-batch" : "draw"}/${roomCode}`,
+          body: JSON.stringify(batch[0].type === "draw" ? batch : batch[0]) });
+      } catch { fail("Could not send drawing. Reconnecting."); }
+    };
     readyRef.current = false;
     setStatus("connecting");
     setConnectedUsers(0);
@@ -48,6 +72,7 @@ export function useWhiteboard(options: Options) {
       readyRef.current = false;
       setStatus("syncing");
       buffered = [];
+      resetOutgoing();
       clearTimeout(syncTimer);
       client.publish({ destination: `/app/join/${roomCode}`, body: "{}" });
       syncTimer = setTimeout(() => fail("The board did not finish loading. Retrying the connection."), 15_000);
@@ -60,6 +85,10 @@ export function useWhiteboard(options: Options) {
       sequence = next;
       awaiting.delete(event.eventId);
       callbacks.current.onEvent(event);
+      if (!awaiting.size) {
+        clearTimeout(ackTimer); ackTimer = undefined;
+        flush();
+      }
     };
 
     const client = new Client({
@@ -133,24 +162,24 @@ export function useWhiteboard(options: Options) {
         if (disposed) return;
         readyRef.current = false;
         clearTimeout(syncTimer); clearTimeout(ackTimer); ackTimer = undefined; awaiting.clear();
+        resetOutgoing();
         if (!disposed) setStatus(current => current === "expired" ? current : "offline");
       },
       onStompError: () => fail("The server rejected the connection. Check the room or try again shortly."),
     });
     // Track unacknowledged drawing so a silent server failure cannot leave a local-only stroke.
     publishRef.current = event => {
-      client.publish({ destination: `/app/draw/${roomCode}`, body: JSON.stringify(event) });
-      awaiting.add(event.eventId);
-      if (!ackTimer) ackTimer = setTimeout(() => {
-        ackTimer = undefined;
-        if (awaiting.size && client.connected) synchronize();
-      }, 10_000);
+      // Keep at most one batch in flight. Segments collected during its round trip
+      // share the next Redis write instead of queuing one storage request each.
+      outgoing.push(event);
+      if (!awaiting.size && !sendTimer) sendTimer = setTimeout(flush, 20);
     };
     clientRef.current = client;
     client.activate();
     return () => {
       disposed = true; readyRef.current = false;
       clearTimeout(syncTimer); clearTimeout(ackTimer);
+      resetOutgoing();
       void client.deactivate(); clientRef.current = null; publishRef.current = null;
     };
   }, [roomCode, wsUrl]);

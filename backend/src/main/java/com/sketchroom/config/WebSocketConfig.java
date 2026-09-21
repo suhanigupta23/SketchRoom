@@ -49,7 +49,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 StompHeaderAccessor headers = StompHeaderAccessor.wrap(message);
                 String destination = headers.getDestination();
                 if (headers.getCommand() == StompCommand.SEND) {
-                    if (destination == null || !destination.matches("/app/(draw|clear|join)/[A-Z0-9]{6}")) {
+                    if (destination == null || !destination.matches("/app/(draw|draw-batch|clear|join)/[A-Z0-9]{6}")) {
                         throw new IllegalArgumentException("Unsupported message destination.");
                     }
                 } else if (headers.getCommand() == StompCommand.SUBSCRIBE) {

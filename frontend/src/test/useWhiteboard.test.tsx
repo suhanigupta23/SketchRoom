@@ -69,6 +69,28 @@ describe("whiteboard synchronization", () => {
     expect(result.current.status).toBe("syncing");
     expect(onEvent).not.toHaveBeenCalled();
   });
+  it("groups segments behind one in-flight write and keeps clear after drawing", () => {
+    const { result } = renderHook(() => useWhiteboard({ roomCode: "ABC234", onSnapshot: vi.fn(), onEvent: vi.fn(), onError: vi.fn() }));
+    act(() => fake.clients[0].options.onConnect());
+    deliver("/user/queue/snapshot", snapshot(0));
+    const client = fake.clients[0]; client.publish.mockClear();
+    const draw = (id: number): DrawEvent => ({ type: "draw", eventId: `draw-${id}`, strokeId: "stroke", x: 2, y: 2, prevX: 1, prevY: 1, color: "#000000", size: 4, isEraser: false });
+    act(() => { result.current.sendEvent(draw(1)); vi.advanceTimersByTime(20); });
+    expect(client.publish).toHaveBeenCalledTimes(1);
+    act(() => {
+      result.current.sendEvent(draw(2)); result.current.sendEvent(draw(3));
+      result.current.sendEvent({ type: "clear", eventId: "clear" });
+      vi.advanceTimersByTime(100);
+    });
+    expect(client.publish).toHaveBeenCalledTimes(1);
+    deliver("/topic/room/ABC234", { ...draw(1), sequence: 1 });
+    expect(client.publish).toHaveBeenLastCalledWith({ destination: "/app/draw-batch/ABC234", body: JSON.stringify([draw(2), draw(3)]) });
+    deliver("/topic/room/ABC234", { ...draw(2), sequence: 2 });
+    expect(client.publish).toHaveBeenCalledTimes(2);
+    deliver("/topic/room/ABC234", { ...draw(3), sequence: 3 });
+    expect(client.publish).toHaveBeenLastCalledWith({ destination: "/app/draw/ABC234", body: JSON.stringify({ type: "clear", eventId: "clear" }) });
+  });
+
   it("deactivates the client when leaving a room", () => {
     const { unmount } = renderHook(() => useWhiteboard({ roomCode: "ABC234", onSnapshot: vi.fn(), onEvent: vi.fn(), onError: vi.fn() }));
     unmount();
