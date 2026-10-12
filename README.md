@@ -4,7 +4,7 @@
 
 A full-stack collaborative whiteboard for explaining ideas, sketching diagrams, and brainstorming together in the browser. Create a room, share its six-character code, and collaborate without signing up.
 
-[Live demo](https://sketch-room-ashy.vercel.app/) · [Code walkthrough](docs/CODE_WALKTHROUGH.md) · [Deployment guide](docs/DEPLOYMENT.md)
+[Live demo](https://sketch-room-ashy.vercel.app/)
 
 ## The problem
 
@@ -131,7 +131,9 @@ Use `frontend` as the Vercel root, `npm run build` as its build command, and `di
 
 `GET /api/rooms/health` checks liveness. `GET /api/rooms/ready` checks PostgreSQL and Redis connectivity.
 
-Deploy protocol changes **backend first, then frontend**, and refresh existing browser tabs. Existing room columns are preserved; this update does not require a destructive schema migration. See the [deployment guide](docs/DEPLOYMENT.md) for compatibility and smoke tests.
+Deploy protocol changes **backend first, then frontend**, and refresh existing browser tabs. The frontend relies on the backend's private snapshot, undo/redo, and `/app/draw-batch/{code}` protocol. Do not run mismatched backend versions against the same active rooms. Existing room columns are preserved; this update does not require a destructive schema migration.
+
+Before release, back up PostgreSQL, confirm that hosted Redis persistence matches your recovery requirements, and verify that `/api/rooms/ready` returns HTTP 200. Then test two browsers against the deployed URL: create and join a room, draw from both, undo/redo, clear and reload, disconnect/reconnect one browser, check the participant count, and directly refresh a `/room/{code}` URL. Production storage connectivity and capacity are not covered by the mocked automated tests.
 
 ## Tests and quality checks
 
@@ -177,7 +179,6 @@ SketchRoom/
 │   │   ├── dto/                   # Request, response, and event contracts
 │   │   └── config/                # Redis, WebSocket, and CORS configuration
 │   └── src/test/                  # Service, configuration, and transport tests
-├── docs/                         # Code walkthrough and deployment instructions
 └── .github/workflows/             # Automated verification
 ```
 
@@ -201,7 +202,3 @@ SketchRoom/
 - Compact checkpoints and offline reconciliation for longer sessions.
 - A shared external message broker and distributed coordination for multiple backend instances.
 - Load testing, operational metrics, and alerts for storage or synchronization failures.
-
-## Explore the implementation
-
-For the exact function calls behind a button click or drawing action, read the [beginner-friendly code walkthrough](docs/CODE_WALKTHROUGH.md). It explains callbacks, refs, snapshots, toasts, rendering, and persistence using the actual source files.

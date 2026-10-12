@@ -37,5 +37,5 @@ coverage/
 frontend/playwright-report/
 frontend/test-results/
 
-#docs
+# Generated interview-preparation documents
 /docs
